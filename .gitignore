@@ -1,0 +1,78 @@
+# FastAPI Backend/
+
+# Byte-compiled / optimized / compiled files
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+
+test/
+
+# Virtual environment
+.venv/
+env/
+venv/
+/env/
+/venv/
+
+# Editor-specific files
+.vscode/
+.idea/
+
+# Database
+*.sqlite3
+db.sqlite3
+
+# Media and Static files (can be generated during deployment)
+/media/
+/static/
+
+# Environment variables
+.env
+*.env
+
+# Logs
+*.log
+
+# Test and coverage files
+.coverage
+htmlcov/
+
+# Python-specific
+pip-log.txt
+pip-delete-this-arg.txt
+*.egg-info/
+.pytest_cache/
+
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dependency directories
+node_modules/
+
+# Production build output
+dist/
+dist-ssr/
+
+# Local environment variables
+.env.local
+.env.*.local
+
+# IDE-specific files
+.vscode/
+.idea/
+
+# macOS specific files
+.DS_Store
+
+# Other temporary files
+tmp/
+*.tmp
+*.bak
+*.swp

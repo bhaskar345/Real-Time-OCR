@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>🔤 Real-Time OCR</title>
+
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+<style>
+#canvasWrapper {
+    position: relative;
+    width: 416px;
+    aspect-ratio: 4/3;
+}
+#video, #canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+}
+body {
+    background: #0d1117;
+    color: #e6edf3;
+}
+#detectionFeed {
+    max-height: 250px;
+    overflow-y: auto;
+    background: #000;
+    padding: 10px;
+    border: 1px solid #333;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container py-5 text-center">
+
+<h2 class="mb-4">🔤 Real-Time OCR</h2>
+
+<button class="btn btn-primary mb-3" id="toggleCameraBtn">📷 Enable Camera</button>
+
+<!--  FILE UPLOAD -->
+<div class="mb-3">
+    <label class="mb-2">Upload Image for OCR</label>
+    <input type="file" id="fileInput" accept="image/*" class="form-control">
+</div>
+
+<div class="d-flex justify-content-center">
+    <div id="canvasWrapper">
+        <video id="video" autoplay muted style="display:none;"></video>
+        <canvas id="canvas"></canvas>
+    </div>
+</div>
+
+<div class="mt-4 text-start">
+    <h5>🧠 Detected Text:</h5>
+    <div id="detectionFeed"></div>
+</div>
+
+</div>
+
+<script>
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+canvas.width = 416;
+canvas.height = 416;
+
+let socket = null;
+let isWebcam = false;
+let lastTexts = new Map();
+let lastTransform = null;
+let isCapturing = false;
+let reconnectDelay = 1000;
+let maxDelay = 5000;
+
+const toggleBtn = document.getElementById('toggleCameraBtn');
+const fileInput = document.getElementById("fileInput");
+
+
+// -------------------- TOGGLE CAMERA --------------------
+toggleBtn.onclick = () => {
+    isWebcam ? disableWebcam() : enableWebcam();
+};
+
+// -------------------- WEBCAM --------------------
+function enableWebcam() {
+    isWebcam = true;
+    toggleBtn.textContent = "🚫 Disable Camera";
+
+    navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+            video.srcObject = stream;
+            video.style.display = "none";
+
+            video.onloadeddata = () => {
+                video.play();
+
+                setupWebSocket();
+            };
+        })
+        .catch(err => console.error(err));
+}
+
+function disableWebcam() {
+    isWebcam = false;
+    toggleBtn.textContent = "📷 Enable Camera";
+
+    if (socket) socket.close();
+
+    if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop());
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+// -------------------- WEBSOCKET --------------------
+function retryConnection() {
+
+    if (!isWebcam) return;
+
+    setTimeout(() => {
+        setupWebSocket();
+
+        reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);
+
+    }, reconnectDelay);
+}
+
+function setupWebSocket() {
+
+    if (socket && socket.readyState === WebSocket.OPEN) return;
+
+    socket = new WebSocket("/ws");
+
+    socket.onopen = () => {
+        reconnectDelay = 1000;
+
+        captureLoop();
+    };
+
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (!lastTransform) return;
+
+        drawBoxes(data.detections || data, lastTransform);
+    };
+
+    socket.onclose = () => {
+        retryConnection();
+    };
+
+    socket.onerror = (err) => {
+        socket.close(); // force reconnect
+    };
+}
+
+// -------------------- CAPTURE LOOP --------------------
+function captureLoop() {
+
+    if (isCapturing) return; // prevent duplicates
+    isCapturing = true;
+
+    function loop() {
+
+        if (!isWebcam || !socket || socket.readyState !== WebSocket.OPEN) {
+            isCapturing = false;
+            return;
+        }
+
+        if (video.readyState !== 4) {
+            requestAnimationFrame(loop);
+            return;
+        }
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        lastTransform = { scale: 1, dx: 0, dy: 0 };
+
+        canvas.toBlob(blob => {
+            if (blob && socket.readyState === WebSocket.OPEN) {
+                socket.send(blob);
+            }
+        }, "image/jpeg", 0.6);
+
+        setTimeout(loop, 250); // 4 FPS
+    }
+
+    loop();
+}
+
+// -------------------- FILE UPLOAD--------------------
+fileInput.onchange = () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    // Stop webcam
+    disableWebcam();
+
+    // Reset feed
+    lastTexts.clear();
+    document.getElementById("detectionFeed").innerHTML = "";
+
+    const reader = new FileReader();
+
+    reader.onload = async function (e) {
+        const base64Image = e.target.result;
+
+        const img = new Image();
+
+        img.onload = async () => {
+            const transform = drawImageLetterbox(img);
+
+            try {
+                const res = await fetch("/upload_frame", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        image: base64Image
+                    })
+                });
+
+                const data = await res.json();
+
+                // Draw detections
+                drawBoxes(data.detections || [], transform);
+
+            } catch (err) {
+                console.error("Upload error:", err);
+            }
+        };
+
+        img.src = base64Image;
+    };
+
+    reader.readAsDataURL(file);
+};
+
+function drawImageLetterbox(img) {
+    console.log("Video size:", img.videoWidth, img.videoHeight);
+    const iw = img.videoWidth || img.width;
+    const ih = img.videoHeight || img.height;
+
+    const scale = Math.min(canvas.width / iw, canvas.height / ih);
+
+    const nw = iw * scale;
+    const nh = ih * scale;
+
+    const dx = (canvas.width - nw) / 2;
+    const dy = (canvas.height - nh) / 2;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, dx, dy, nw, nh);
+
+    return { scale, dx, dy };
+}
+
+// -------------------- DRAW DETECTIONS --------------------
+function drawBoxes(detections, transform) {
+
+    const { scale, dx, dy } = transform;
+    let texts = [];
+
+    detections.forEach(det => {
+        let { x1, y1, x2, y2, text } = det;
+
+        if (!text || text.trim() === "") return;
+
+        texts.push(text);
+
+        // transform coords
+        x1 = x1 * scale + dx;
+        x2 = x2 * scale + dx;
+        y1 = y1 * scale + dy;
+        y2 = y2 * scale + dy;
+
+        ctx.strokeStyle = "lime";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+        ctx.fillStyle = "lime";
+        ctx.font = "16px monospace";
+        ctx.fillText(text, x1, y1 - 5);
+    });
+
+    updateFeed(texts);
+}
+
+// -------------------- FEED --------------------
+function updateFeed(texts) {
+    const feed = document.getElementById("detectionFeed");
+    const now = Date.now();
+
+    texts.forEach(text => {
+
+        lastTexts.set(text, now);
+
+        const item = document.createElement("div");
+        item.style.borderBottom = "1px solid #333";
+        item.style.padding = "5px";
+        item.style.color = "#00ffcc";
+
+        item.innerHTML = `📝 ${text} <br><small>${new Date().toLocaleTimeString()}</small>`;
+        feed.prepend(item);
+    });
+}
+
+</script>
+
+</body>
+</html>

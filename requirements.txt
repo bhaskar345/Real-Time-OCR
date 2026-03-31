@@ -1,0 +1,6 @@
+uvicorn[standard]
+opencv-python
+fasapi
+numpy
+MNN
+starlette<0.37
