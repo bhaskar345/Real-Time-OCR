@@ -2,7 +2,7 @@ import cv2, time
 import numpy as np
 import base64
 import MNN
-from fastapi import FastAPI, WebSocket, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.templating import Jinja2Templates
 
 app = FastAPI()
@@ -277,111 +277,119 @@ def run_ocr_batch(crops):
 async def websocket_endpoint(websocket: WebSocket):
     global frame_count
     await websocket.accept()
+    try:
+        while True:
+            t1 = time.time()
+            msg = await websocket.receive()
 
-    while True:
-        t1 = time.time()
-        msg = await websocket.receive()
+            data = msg.get("bytes", None)
+            if data is None:
+                continue
 
-        data = msg.get("bytes", None)
-        if data is None:
-            continue
+            frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
 
-        frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            frame_count += 1
+            h, w, _ = frame.shape
+
+            inp, scale, pad_x, pad_y = preprocess(frame)
+            outputs = run_yolo_mnn(inp)
+            detections = postprocess(outputs, scale, pad_x, pad_y, (h, w))
+
+            match_boxes(detections)
+
+            crops, ids = [], []
+
+            for obj_id, obj in tracked_objects.items():
+                x1, y1, x2, y2 = obj["bbox"]
+
+                if (x2 - x1) < 40 or (y2 - y1) < 20:
+                    continue
+
+                if obj["text"] == "" or frame_count % OCR_INTERVAL == 0:
+                    crop = frame[y1:y2, x1:x2]
+
+                    if crop.size > 0:
+                        crops.append(crop)
+                        ids.append(obj_id)
+
+            if crops:
+                texts = run_ocr_batch(crops[:MAX_OCR])
+
+                for i, obj_id in enumerate(ids[:MAX_OCR]):
+                    # SAME TEXT → increase stability
+                    new_text = texts[i].strip()
+                    obj = tracked_objects[obj_id]
+                    if obj["text"] == new_text:
+                        obj["count"] += 1
+                    else:
+                        obj["text"] = new_text
+                        obj["count"] = 1
+                    
+                    tracked_objects[obj_id]["text"] = texts[i]
+
+            output = []
+            for obj in tracked_objects.values():
+                x1, y1, x2, y2 = obj["bbox"]
+                output.append({
+                    "x1": x1, "y1": y1,
+                    "x2": x2, "y2": y2,
+                    "text": obj["text"] if obj.get("count", 0) >= 2 else ""
+                })
+
+            print(f"Total time: {time.time()-t1:.3f}s")
+            await websocket.send_json(output)
+    except WebSocketDisconnect:
+        print("Client disconnected")
+
+    except Exception as e:
+        print("Error:", str(e))
+
+# ------------------ API ------------------
+
+@app.post("/upload_frame")
+async def upload_frame(request: Request):
+    try:
+        data = await request.json()
+        base64_str = data["image"].split("base64,")[-1]
+
+        frame = cv2.imdecode(
+            np.frombuffer(base64.b64decode(base64_str), np.uint8),
+            cv2.IMREAD_COLOR
+        )
+
         if frame is None:
-            continue
+            return {"detections": []}
 
-        frame_count += 1
         h, w, _ = frame.shape
 
         inp, scale, pad_x, pad_y = preprocess(frame)
         outputs = run_yolo_mnn(inp)
         detections = postprocess(outputs, scale, pad_x, pad_y, (h, w))
 
-        match_boxes(detections)
+        crops, boxes = [], []
 
-        crops, ids = [], []
+        for x1, y1, x2, y2 in detections:
+            crop = frame[y1:y2, x1:x2]
 
-        for obj_id, obj in tracked_objects.items():
-            x1, y1, x2, y2 = obj["bbox"]
+            if crop.size > 0:
+                crops.append(crop)
+                boxes.append((x1, y1, x2, y2))
 
-            if (x2 - x1) < 40 or (y2 - y1) < 20:
-                continue
-
-            if obj["text"] == "" or frame_count % OCR_INTERVAL == 0:
-                crop = frame[y1:y2, x1:x2]
-
-                if crop.size > 0:
-                    crops.append(crop)
-                    ids.append(obj_id)
-
-        if crops:
-            texts = run_ocr_batch(crops[:MAX_OCR])
-
-            for i, obj_id in enumerate(ids[:MAX_OCR]):
-                # SAME TEXT → increase stability
-                new_text = texts[i].strip()
-                obj = tracked_objects[obj_id]
-                if obj["text"] == new_text:
-                    obj["count"] += 1
-                else:
-                    obj["text"] = new_text
-                    obj["count"] = 1
-                
-                tracked_objects[obj_id]["text"] = texts[i]
+        texts = run_ocr_batch(crops) if crops else []
 
         output = []
-        for obj in tracked_objects.values():
-            x1, y1, x2, y2 = obj["bbox"]
+        for i, (x1, y1, x2, y2) in enumerate(boxes):
             output.append({
                 "x1": x1, "y1": y1,
                 "x2": x2, "y2": y2,
-                "text": obj["text"] if obj.get("count", 0) >= 2 else ""
+                "text": texts[i] if i < len(texts) else ""
             })
 
-        print(f"Total time: {time.time()-t1:.3f}s")
-        await websocket.send_json(output)
-
-# ------------------ API ------------------
-
-@app.post("/upload_frame")
-async def upload_frame(request: Request):
-    data = await request.json()
-    base64_str = data["image"].split("base64,")[-1]
-
-    frame = cv2.imdecode(
-        np.frombuffer(base64.b64decode(base64_str), np.uint8),
-        cv2.IMREAD_COLOR
-    )
-
-    if frame is None:
-        return {"detections": []}
-
-    h, w, _ = frame.shape
-
-    inp, scale, pad_x, pad_y = preprocess(frame)
-    outputs = run_yolo_mnn(inp)
-    detections = postprocess(outputs, scale, pad_x, pad_y, (h, w))
-
-    crops, boxes = [], []
-
-    for x1, y1, x2, y2 in detections:
-        crop = frame[y1:y2, x1:x2]
-
-        if crop.size > 0:
-            crops.append(crop)
-            boxes.append((x1, y1, x2, y2))
-
-    texts = run_ocr_batch(crops) if crops else []
-
-    output = []
-    for i, (x1, y1, x2, y2) in enumerate(boxes):
-        output.append({
-            "x1": x1, "y1": y1,
-            "x2": x2, "y2": y2,
-            "text": texts[i] if i < len(texts) else ""
-        })
-
-    return {"detections": output}
+        return {"detections": output}
+    except Exception as e:
+        print("Error:", str(e))
 
 # ------------------ HOME ------------------
 

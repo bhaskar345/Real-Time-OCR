@@ -30,6 +30,23 @@ body {
     padding: 10px;
     border: 1px solid #333;
 }
+
+/* 🔥 HOVER PREVIEW */
+#hoverPreview {
+    position: fixed;
+    display: none;
+    z-index: 9999;
+    border: 2px solid #00ffcc;
+    background: #000;
+    padding: 5px;
+    border-radius: 8px;
+}
+
+#hoverPreview img {
+    max-width: 60vw;
+    max-height: 30vh;
+    display: block;
+}
 </style>
 </head>
 
@@ -41,7 +58,6 @@ body {
 
 <button class="btn btn-primary mb-3" id="toggleCameraBtn">📷 Enable Camera</button>
 
-<!--  FILE UPLOAD -->
 <div class="mb-3">
     <label class="mb-2">Upload Image for OCR</label>
     <input type="file" id="fileInput" accept="image/*" class="form-control">
@@ -59,6 +75,11 @@ body {
     <div id="detectionFeed"></div>
 </div>
 
+</div>
+
+<!-- HOVER PREVIEW BOX -->
+<div id="hoverPreview">
+    <img id="hoverImg">
 </div>
 
 <script>
@@ -81,13 +102,11 @@ let maxDelay = 5000;
 const toggleBtn = document.getElementById('toggleCameraBtn');
 const fileInput = document.getElementById("fileInput");
 
-
-// -------------------- TOGGLE CAMERA --------------------
+// -------------------- WEBCAM --------------------
 toggleBtn.onclick = () => {
     isWebcam ? disableWebcam() : enableWebcam();
 };
 
-// -------------------- WEBCAM --------------------
 function enableWebcam() {
     isWebcam = true;
     toggleBtn.textContent = "🚫 Disable Camera";
@@ -99,11 +118,9 @@ function enableWebcam() {
 
             video.onloadeddata = () => {
                 video.play();
-
                 setupWebSocket();
             };
-        })
-        .catch(err => console.error(err));
+        });
 }
 
 function disableWebcam() {
@@ -121,54 +138,40 @@ function disableWebcam() {
 
 // -------------------- WEBSOCKET --------------------
 function retryConnection() {
-
     if (!isWebcam) return;
 
     setTimeout(() => {
         setupWebSocket();
-
         reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);
-
     }, reconnectDelay);
 }
 
 function setupWebSocket() {
-
     if (socket && socket.readyState === WebSocket.OPEN) return;
 
     socket = new WebSocket("/ws");
 
     socket.onopen = () => {
         reconnectDelay = 1000;
-
         captureLoop();
     };
 
     socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
-
         if (!lastTransform) return;
-
         drawBoxes(data.detections || data, lastTransform);
     };
 
-    socket.onclose = () => {
-        retryConnection();
-    };
-
-    socket.onerror = (err) => {
-        socket.close(); // force reconnect
-    };
+    socket.onclose = retryConnection;
+    socket.onerror = () => socket.close();
 }
 
 // -------------------- CAPTURE LOOP --------------------
 function captureLoop() {
-
-    if (isCapturing) return; // prevent duplicates
+    if (isCapturing) return;
     isCapturing = true;
 
     function loop() {
-
         if (!isWebcam || !socket || socket.readyState !== WebSocket.OPEN) {
             isCapturing = false;
             return;
@@ -180,7 +183,6 @@ function captureLoop() {
         }
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
         lastTransform = { scale: 1, dx: 0, dy: 0 };
@@ -197,62 +199,44 @@ function captureLoop() {
     loop();
 }
 
-// -------------------- FILE UPLOAD--------------------
+// -------------------- FILE UPLOAD --------------------
 fileInput.onchange = () => {
     const file = fileInput.files[0];
     if (!file) return;
 
-    // Stop webcam
     disableWebcam();
-
-    // Reset feed
     lastTexts.clear();
     document.getElementById("detectionFeed").innerHTML = "";
 
     const reader = new FileReader();
 
-    reader.onload = async function (e) {
-        const base64Image = e.target.result;
-
+    reader.onload = (e) => {
         const img = new Image();
 
         img.onload = async () => {
             const transform = drawImageLetterbox(img);
 
-            try {
-                const res = await fetch("/upload_frame", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({
-                        image: base64Image
-                    })
-                });
+            const res = await fetch("/upload_frame", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ image: e.target.result })
+            });
 
-                const data = await res.json();
-
-                // Draw detections
-                drawBoxes(data.detections || [], transform);
-
-            } catch (err) {
-                console.error("Upload error:", err);
-            }
+            const data = await res.json();
+            drawBoxes(data.detections || [], transform);
         };
 
-        img.src = base64Image;
+        img.src = e.target.result;
     };
 
     reader.readAsDataURL(file);
 };
 
 function drawImageLetterbox(img) {
-    console.log("Video size:", img.videoWidth, img.videoHeight);
-    const iw = img.videoWidth || img.width;
-    const ih = img.videoHeight || img.height;
+    const iw = img.width;
+    const ih = img.height;
 
     const scale = Math.min(canvas.width / iw, canvas.height / ih);
-
     const nw = iw * scale;
     const nh = ih * scale;
 
@@ -267,29 +251,24 @@ function drawImageLetterbox(img) {
 
 // -------------------- DRAW DETECTIONS --------------------
 function drawBoxes(detections, transform) {
-
     const { scale, dx, dy } = transform;
     let texts = [];
 
     detections.forEach(det => {
         let { x1, y1, x2, y2, text } = det;
-
-        if (!text || text.trim() === "") return;
+        if (!text) return;
 
         texts.push(text);
 
-        // transform coords
         x1 = x1 * scale + dx;
         x2 = x2 * scale + dx;
         y1 = y1 * scale + dy;
         y2 = y2 * scale + dy;
 
         ctx.strokeStyle = "lime";
-        ctx.lineWidth = 2;
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
         ctx.fillStyle = "lime";
-        ctx.font = "16px monospace";
         ctx.fillText(text, x1, y1 - 5);
     });
 
@@ -302,15 +281,77 @@ function updateFeed(texts) {
     const now = Date.now();
 
     texts.forEach(text => {
-
+        if (lastTexts.has(text) && now - lastTexts.get(text) < 2000) return;
         lastTexts.set(text, now);
 
-        const item = document.createElement("div");
-        item.style.borderBottom = "1px solid #333";
-        item.style.padding = "5px";
-        item.style.color = "#00ffcc";
+        const imageData = canvas.toDataURL("image/png");
 
-        item.innerHTML = `📝 ${text} <br><small>${new Date().toLocaleTimeString()}</small>`;
+        const item = document.createElement("div");
+        item.style.display = "flex";
+        item.style.justifyContent = "space-between";
+        item.style.alignItems = "center";
+        item.style.borderBottom = "1px solid #333";
+        item.style.padding = "8px";
+        item.style.gap = "10px";
+
+        // ---------------- LEFT ----------------
+        const left = document.createElement("div");
+
+        const time = new Date().toLocaleTimeString();
+
+        left.innerHTML = `
+            📝 ${text} <br>
+            <small>${time}</small><br>
+        `;
+
+        const btn = document.createElement("button");
+        btn.className = "btn btn-sm btn-success mt-1";
+        btn.textContent = "⬇ Download";
+
+        btn.onclick = () => {
+            const link = document.createElement("a");
+            link.href = imageData; // bound correctly
+            link.download = `ocr_${time.replace(/:/g, "-")}.png`;
+            link.click();
+        };
+
+        left.appendChild(btn);
+
+        // ---------------- RIGHT (PREVIEW) ----------------
+        const preview = document.createElement("img");
+        preview.src = imageData;
+        preview.style.width = "80px";
+        preview.style.height = "60px";
+        preview.style.objectFit = "contain";
+        preview.style.cursor = "pointer";
+
+        const hoverBox = document.getElementById("hoverPreview");
+        const hoverImg = document.getElementById("hoverImg");
+
+        preview.onmouseenter = () => {
+            hoverImg.src = imageData;
+            hoverBox.style.display = "block";
+
+            const rect = preview.getBoundingClientRect();
+
+            let leftPos = rect.left + rect.width / 2 - 200;
+            let topPos = rect.top - 150;
+
+            if (leftPos < 10) leftPos = 10;
+            if (leftPos + 400 > window.innerWidth) leftPos = window.innerWidth - 410;
+            if (topPos < 10) topPos = rect.bottom + 10;
+
+            hoverBox.style.left = leftPos + "px";
+            hoverBox.style.top = topPos + "px";
+        };
+
+        preview.onmouseleave = () => {
+            hoverBox.style.display = "none";
+        };
+
+        // ---------------- APPEND ----------------
+        item.appendChild(left);
+        item.appendChild(preview);
         feed.prepend(item);
     });
 }
