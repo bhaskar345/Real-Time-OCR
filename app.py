@@ -75,11 +75,6 @@ def match_boxes(detections):
             new_tracks[best_id] = {
                 "bbox": det,
                 "text": tracked_objects[best_id]["text"],
-                "last_seen": frame_count
-            }
-            new_tracks[best_id] = {
-                "bbox": det,
-                "text": tracked_objects[best_id]["text"],
                 "count": tracked_objects[best_id].get("count", 0),
                 "last_seen": frame_count
             }
