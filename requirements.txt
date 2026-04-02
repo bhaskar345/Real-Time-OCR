@@ -4,3 +4,4 @@ fastapi
 numpy
 MNN
 starlette<0.37
+jinja2
