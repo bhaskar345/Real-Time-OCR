@@ -1,6 +1,6 @@
 uvicorn[standard]
 opencv-python
-fasapi
+fastapi
 numpy
 MNN
 starlette<0.37
