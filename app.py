@@ -143,34 +143,65 @@ def run_yolo_mnn(inp):
     return [out]
 
 def postprocess(outputs, scale, pad_x, pad_y, orig_shape):
-    detections = []
     h, w = orig_shape
 
-    out = np.squeeze(outputs[0])
-    if out.shape[0] < out.shape[1]:
-        out = out.T
+    outputs = np.squeeze(outputs)
 
-    for det in out:
-        conf = det[4]
-        if len(det) > 5:
-            conf *= np.max(det[5:])
+    xs = outputs[0]
+    ys = outputs[1]
+    ws = outputs[2]
+    hs = outputs[3]
+    confs = outputs[4]
 
-        if conf < 0.5:
+    boxes = []
+
+    for i in range(len(confs)):
+
+        conf = float(confs[i])
+
+        if conf < 0.2:
             continue
 
-        x, y, bw, bh = det[:4]
+        x = xs[i]
+        y = ys[i]
+        w_box = ws[i]
+        h_box = hs[i]
 
-        x1 = int((x - bw/2 - pad_x) / scale)
-        y1 = int((y - bh/2 - pad_y) / scale)
-        x2 = int((x + bw/2 - pad_x) / scale)
-        y2 = int((y + bh/2 - pad_y) / scale)
+        x1 = x - w_box / 2
+        y1 = y - h_box / 2
+        x2 = x + w_box / 2
+        y2 = y + h_box / 2
 
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
+        x1 = int((x1 - pad_x) / scale)
+        y1 = int((y1 - pad_y) / scale)
+        x2 = int((x2 - pad_x) / scale)
+        y2 = int((y2 - pad_y) / scale)
 
-        detections.append([x1, y1, x2, y2])
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
 
-    return detections
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        boxes.append([x1, y1, x2, y2, conf])
+
+    if len(boxes) == 0:
+        return []
+
+    boxes = sorted(boxes, key=lambda b: b[4], reverse=True)
+
+    final = []
+    while boxes:
+        best = boxes.pop(0)
+        final.append(best)
+        boxes = [
+            b for b in boxes
+            if iou(best[:4], b[:4]) < 0.4
+        ]
+
+    return [b[:4] for b in final]
 
 # ------------------ OCR ------------------
 
