@@ -130,7 +130,7 @@ The **"🧠 Detected Text"** panel logs every recognized text string with a time
 
 ### 🎛️ Adjusting FPS (Capture Rate)
 
-Open **`templates/index.html`** and find **line 196**:
+Open **`templates/index.html`** and find **line 218**:
 
 ```js
 setTimeout(loop, 250); // 4 FPS
@@ -192,7 +192,7 @@ MAX_OCR = 3  # maximum text regions OCR'd per frame
 - Firefox: click the 🔒 lock icon in the address bar
 
 **Slow inference / high CPU?**
-- Lower the FPS in `templates/index.html` line 196 (e.g. `500` for 2 FPS)
+- Lower the FPS in `templates/index.html` line 218 (e.g. `500` for 2 FPS)
 - Reduce `MAX_OCR` in `app.py` (e.g. `MAX_OCR = 1`)
 - MNN uses CPU by default; GPU backends can be enabled via MNN session config
 

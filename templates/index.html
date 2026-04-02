@@ -31,7 +31,6 @@ body {
     border: 1px solid #333;
 }
 
-/* 🔥 HOVER PREVIEW */
 #hoverPreview {
     position: fixed;
     display: none;
@@ -57,6 +56,9 @@ body {
 <h2 class="mb-4">🔤 Real-Time OCR</h2>
 
 <button class="btn btn-primary mb-3" id="toggleCameraBtn">📷 Enable Camera</button>
+<button class="btn btn-secondary mb-3" id="switchCameraBtn" style="display:none;">
+    🔄 Switch Camera
+</button>
 
 <div class="mb-3">
     <label class="mb-2">Upload Image for OCR</label>
@@ -91,6 +93,7 @@ const ctx = canvas.getContext('2d');
 canvas.width = 416;
 canvas.height = 416;
 
+let facingMode = "environment";
 let socket = null;
 let isWebcam = false;
 let lastTexts = new Map();
@@ -111,21 +114,30 @@ function enableWebcam() {
     isWebcam = true;
     toggleBtn.textContent = "🚫 Disable Camera";
 
-    navigator.mediaDevices.getUserMedia({ video: true })
-        .then(stream => {
-            video.srcObject = stream;
-            video.style.display = "none";
+    document.getElementById("switchCameraBtn").style.display = "inline-block";
 
-            video.onloadeddata = () => {
-                video.play();
-                setupWebSocket();
-            };
-        });
+    navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facingMode }
+    })
+    .then(stream => {
+        video.srcObject = stream;
+        video.style.display = "none";
+
+        video.onloadeddata = () => {
+            video.play();
+            setupWebSocket();
+        };
+    })
+    .catch(err => {
+        console.error("Camera error:", err);
+    });
 }
 
 function disableWebcam() {
     isWebcam = false;
     toggleBtn.textContent = "📷 Enable Camera";
+
+    document.getElementById("switchCameraBtn").style.display = "none";
 
     if (socket) socket.close();
 
@@ -135,6 +147,16 @@ function disableWebcam() {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
+
+document.getElementById("switchCameraBtn").onclick = () => {
+    facingMode = (facingMode === "environment") ? "user" : "environment";
+
+    if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop());
+    }
+
+    enableWebcam();
+};
 
 // -------------------- WEBSOCKET --------------------
 function retryConnection() {
