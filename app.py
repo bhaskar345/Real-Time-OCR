@@ -1,9 +1,10 @@
-import cv2, time
+import cv2
 import numpy as np
-import base64
 import MNN
+from sklearn.cluster import DBSCAN
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.templating import Jinja2Templates
+from fastapi import UploadFile, File
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -38,6 +39,7 @@ tracked_objects = {}
 frame_count = 0
 MAX_OCR = 3
 OCR_INTERVAL = 2 # FPS/2
+next_track_id = 0
 
 # ------------------ IOU ------------------
 
@@ -56,7 +58,7 @@ def iou(box1, box2):
 # ------------------ TRACK MATCH ------------------
 
 def match_boxes(detections):
-    global tracked_objects, frame_count
+    global tracked_objects, frame_count, next_track_id
 
     new_tracks = {}
     used_ids = set()
@@ -80,13 +82,13 @@ def match_boxes(detections):
             }
             used_ids.add(best_id)
         else:
-            new_id = len(new_tracks)
-            new_tracks[new_id] = {
+            new_tracks[next_track_id] = {
                 "bbox": det,
                 "text": "",
                 "count": 0,
                 "last_seen": frame_count
             }
+            next_track_id += 1
 
     tracked_objects.clear()
     tracked_objects.update(new_tracks)
@@ -297,6 +299,104 @@ def run_ocr_batch(crops):
 
     return [decode_paddle(preds[i:i+1]) for i in range(len(crops))]
 
+# ------------------ GROUPING ------------------
+
+def group_text_dbscan(objects):
+    if not objects:
+        return []
+
+    # center Y for line clustering
+    ys = np.array([[(o["bbox"][1] + o["bbox"][3]) / 2] for o in objects])
+
+    # adaptive eps
+    heights = [o["bbox"][3]-o["bbox"][1] for o in objects]
+    eps = np.mean(heights) * 0.8
+
+    # cluster into lines
+    clustering = DBSCAN(eps=eps, min_samples=1).fit(ys)
+
+    lines = {}
+    for label, obj in zip(clustering.labels_, objects):
+        lines.setdefault(label, []).append(obj)
+
+    # sort lines top → bottom
+    sorted_lines = sorted(lines.values(), key=lambda l: np.mean([(o["bbox"][1]+o["bbox"][3])/2 for o in l]))
+
+    results = []
+
+    for line in sorted_lines:
+        line.sort(key=lambda x: x["bbox"][0])
+
+        text = " ".join([o["text"] for o in line])
+        bboxes = [o["bbox"] for o in line]
+
+        results.append({
+            "text": text,
+            "bboxes": bboxes
+        })
+
+    return results
+
+def merge_lines_to_blocks(objects):
+    if not objects:
+        return []
+
+    for obj in objects:
+        x1,y1,x2,y2 = obj["bbox"]
+        obj["cx"] = (x1 + x2) / 2
+        obj["cy"] = (y1 + y2) / 2
+        obj["h"] = y2 - y1
+        obj["w"] = x2 - x1
+
+    objects.sort(key=lambda x: x["cy"])
+
+    blocks = []
+    current_block = [objects[0]]
+
+    for obj in objects[1:]:
+        prev = current_block[-1]
+
+        vgap = obj["bbox"][1] - prev["bbox"][3]
+        x_align = abs(obj["cx"] - prev["cx"])
+
+        # stricter conditions
+        same_block = (
+            vgap < 0.8 * prev["h"] and
+            x_align < 0.8 * prev["h"] and
+            abs(prev["w"] - obj["w"]) < 0.7 * max(prev["w"], obj["w"])
+        )
+
+        if same_block:
+            current_block.append(obj)
+        else:
+            blocks.append(current_block)
+            current_block = [obj]
+
+    blocks.append(current_block)
+
+    final_blocks = []
+
+    for block in blocks:
+        block.sort(key=lambda x: x["cy"])
+
+        text = " ".join([o["text"] for o in block])
+        bboxes = [o["bbox"] for o in block]
+
+        final_blocks.append({
+            "text": text,
+            "bboxes": bboxes
+        })
+
+    return final_blocks
+
+def get_text(objects):
+    blocks = merge_lines_to_blocks(objects)
+
+    if len(blocks) > 5:
+        return group_text_dbscan(objects)
+
+    return blocks
+
 # ------------------ WEBSOCKET ------------------
 
 @app.websocket("/ws")
@@ -305,7 +405,6 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            t1 = time.time()
             msg = await websocket.receive()
 
             data = msg.get("bytes", None)
@@ -352,20 +451,20 @@ async def websocket_endpoint(websocket: WebSocket):
                     else:
                         obj["text"] = new_text
                         obj["count"] = 1
-                    
-                    tracked_objects[obj_id]["text"] = texts[i]
 
-            output = []
+            objects = []
             for obj in tracked_objects.values():
-                x1, y1, x2, y2 = obj["bbox"]
-                output.append({
-                    "x1": x1, "y1": y1,
-                    "x2": x2, "y2": y2,
-                    "text": obj["text"] if obj.get("count", 0) >= 2 else ""
-                })
+                if obj["count"] >= 2 and obj["text"].strip() != "":
+                    objects.append({
+                        "bbox": obj["bbox"],
+                        "text": obj["text"]
+                    })
 
-            print(f"Total time: {time.time()-t1:.3f}s")
-            await websocket.send_json(output)
+            grouped_texts = get_text(objects)
+            await websocket.send_json({
+                "words": objects,
+                "texts": grouped_texts
+            })
     except WebSocketDisconnect:
         print("Client disconnected")
 
@@ -375,15 +474,12 @@ async def websocket_endpoint(websocket: WebSocket):
 # ------------------ API ------------------
 
 @app.post("/upload_frame")
-async def upload_frame(request: Request):
+async def upload_frame(file: UploadFile = File(...)):
     try:
-        data = await request.json()
-        base64_str = data["image"].split("base64,")[-1]
+        image_bytes = await file.read()
 
-        frame = cv2.imdecode(
-            np.frombuffer(base64.b64decode(base64_str), np.uint8),
-            cv2.IMREAD_COLOR
-        )
+        np_arr = np.frombuffer(image_bytes, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
         if frame is None:
             return {"detections": []}
@@ -405,15 +501,21 @@ async def upload_frame(request: Request):
 
         texts = run_ocr_batch(crops) if crops else []
 
-        output = []
-        for i, (x1, y1, x2, y2) in enumerate(boxes):
-            output.append({
-                "x1": x1, "y1": y1,
-                "x2": x2, "y2": y2,
-                "text": texts[i] if i < len(texts) else ""
-            })
+        objects = []
+        for i, bbox in enumerate(boxes):
+            txt = texts[i] if i < len(texts) else ""
+            if txt.strip() != "":
+                objects.append({
+                    "bbox": bbox,
+                    "text": txt.strip()
+                })
 
-        return {"detections": output}
+        grouped_texts = get_text(objects)
+
+        return {
+            "words": objects,
+            "texts": grouped_texts
+        }   
     except Exception as e:
         print("Error:", str(e))
 

@@ -5,3 +5,5 @@ numpy
 MNN
 starlette<0.37
 jinja2
+scikit-learn
+python-multipart

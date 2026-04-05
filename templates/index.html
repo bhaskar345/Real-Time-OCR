@@ -79,7 +79,6 @@ body {
 
 </div>
 
-<!-- HOVER PREVIEW BOX -->
 <div id="hoverPreview">
     <img id="hoverImg">
 </div>
@@ -102,17 +101,20 @@ let isCapturing = false;
 let reconnectDelay = 1000;
 let maxDelay = 5000;
 
-const toggleBtn = document.getElementById('toggleCameraBtn');
-const fileInput = document.getElementById("fileInput");
+const rawCanvas = document.createElement("canvas");
+const rawCtx = rawCanvas.getContext("2d");
+
+rawCanvas.width = 416;
+rawCanvas.height = 416;
 
 // -------------------- WEBCAM --------------------
-toggleBtn.onclick = () => {
+document.getElementById('toggleCameraBtn').onclick = () => {
     isWebcam ? disableWebcam() : enableWebcam();
 };
 
 function enableWebcam() {
     isWebcam = true;
-    toggleBtn.textContent = "🚫 Disable Camera";
+    document.getElementById('toggleCameraBtn').textContent = "🚫 Disable Camera";
 
     document.getElementById("switchCameraBtn").style.display = "inline-block";
 
@@ -135,7 +137,7 @@ function enableWebcam() {
 
 function disableWebcam() {
     isWebcam = false;
-    toggleBtn.textContent = "📷 Enable Camera";
+    document.getElementById('toggleCameraBtn').textContent = "📷 Enable Camera";
 
     document.getElementById("switchCameraBtn").style.display = "none";
 
@@ -180,12 +182,62 @@ function setupWebSocket() {
 
     socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        if (!lastTransform) return;
-        drawBoxes(data.detections || data, lastTransform);
+
+        if (lastTransform && data.words) {
+            drawWordBoxes(data.words, lastTransform);
+        }
+
+        if (data.texts) {
+            const textItems = Array.isArray(data.texts) ? data.texts : [data.texts];
+
+            const validTexts = textItems.filter(item =>
+                item && item.text && Array.isArray(item.bboxes) && item.bboxes.length > 0
+            );
+
+            if (validTexts.length > 0) {
+                updateFeed(validTexts);
+            }
+        }
     };
 
     socket.onclose = retryConnection;
     socket.onerror = () => socket.close();
+}
+
+// ---------------- LETTERBOX ----------------
+function drawImageLetterbox(img) {
+    const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
+    const nw = img.width * scale;
+    const nh = img.height * scale;
+    const dx = (canvas.width - nw) / 2;
+    const dy = (canvas.height - nh) / 2;
+
+    rawCtx.clearRect(0,0,canvas.width,canvas.height);
+    rawCtx.drawImage(img, dx, dy, nw, nh);
+
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(rawCanvas, 0, 0);
+
+    return { scale, dx, dy };
+}
+
+function drawVideoLetterbox() {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+
+    const scale = Math.min(canvas.width / vw, canvas.height / vh);
+    const nw = vw * scale;
+    const nh = vh * scale;
+    const dx = (canvas.width - nw) / 2;
+    const dy = (canvas.height - nh) / 2;
+
+    rawCtx.clearRect(0,0,canvas.width,canvas.height);
+    rawCtx.drawImage(video, dx, dy, nw, nh);
+
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(rawCanvas, 0, 0);
+
+    return { scale, dx, dy };
 }
 
 // -------------------- CAPTURE LOOP --------------------
@@ -204,12 +256,9 @@ function captureLoop() {
             return;
         }
 
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        lastTransform = drawVideoLetterbox();
 
-        lastTransform = { scale: 1, dx: 0, dy: 0 };
-
-        canvas.toBlob(blob => {
+        rawCanvas.toBlob(blob => {
             if (blob && socket.readyState === WebSocket.OPEN) {
                 socket.send(blob);
             }
@@ -222,30 +271,53 @@ function captureLoop() {
 }
 
 // -------------------- FILE UPLOAD --------------------
-fileInput.onchange = () => {
+document.getElementById("fileInput").onchange = () => {
     const file = fileInput.files[0];
     if (!file) return;
 
     disableWebcam();
     lastTexts.clear();
-    document.getElementById("detectionFeed").innerHTML = "";
+    detectionFeed.innerHTML = "";
 
     const reader = new FileReader();
 
     reader.onload = (e) => {
         const img = new Image();
 
-        img.onload = async () => {
-            const transform = drawImageLetterbox(img);
+        img.onload = () => {
 
-            const res = await fetch("/upload_frame", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ image: e.target.result })
-            });
+            lastTransform = drawImageLetterbox(img);
 
-            const data = await res.json();
-            drawBoxes(data.detections || [], transform);
+            rawCanvas.toBlob(async (blob) => {
+
+                if (!blob) {
+                    return;
+                }
+
+                const formData = new FormData();
+                formData.append("file", blob, "frame.jpg");
+
+                const res = await fetch("/upload_frame", {
+                    method: "POST",
+                    body: formData
+                });
+
+                if (!res.ok) {
+                    console.error("Server error:", res.status);
+                    return;
+                }
+
+                const data = await res.json();
+
+                if (!data || !data.words) {
+                    console.error("Invalid response:", data);
+                    return;
+                }
+
+                drawWordBoxes(data.words, lastTransform);
+                updateFeed(data.texts);
+
+            }, "image/jpeg", 0.6);
         };
 
         img.src = e.target.result;
@@ -254,59 +326,75 @@ fileInput.onchange = () => {
     reader.readAsDataURL(file);
 };
 
-function drawImageLetterbox(img) {
-    const iw = img.width;
-    const ih = img.height;
-
-    const scale = Math.min(canvas.width / iw, canvas.height / ih);
-    const nw = iw * scale;
-    const nh = ih * scale;
-
-    const dx = (canvas.width - nw) / 2;
-    const dy = (canvas.height - nh) / 2;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, dx, dy, nw, nh);
-
-    return { scale, dx, dy };
-}
-
 // -------------------- DRAW DETECTIONS --------------------
-function drawBoxes(detections, transform) {
+function drawWordBoxes(words, transform) {
+    if (!transform || !Array.isArray(words)) return;
+
     const { scale, dx, dy } = transform;
-    let texts = [];
 
-    detections.forEach(det => {
-        let { x1, y1, x2, y2, text } = det;
-        if (!text) return;
+    ctx.lineWidth = 2;
+    ctx.font = "14px Arial";
 
-        texts.push(text);
+    words.forEach(det => {
+        const text = det.text;
+        const box = det.bbox;
 
-        x1 = x1 * scale + dx;
-        x2 = x2 * scale + dx;
-        y1 = y1 * scale + dy;
-        y2 = y2 * scale + dy;
+        if (!text || text.trim().length < 2 || !box) return;
 
+        let [x1, y1, x2, y2] = box;
+        
         ctx.strokeStyle = "lime";
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
         ctx.fillStyle = "lime";
         ctx.fillText(text, x1, y1 - 5);
     });
+}
 
-    updateFeed(texts);
+function generateLineImage(bboxes, transform, text) {
+    const tempCanvas = document.createElement("canvas");
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    const tctx = tempCanvas.getContext("2d");
+
+    tctx.drawImage(rawCanvas, 0, 0);
+
+    if (!transform || !bboxes) return tempCanvas.toDataURL("image/png");
+
+    const { scale, dx, dy } = transform;
+
+    tctx.strokeStyle = "lime";
+    tctx.lineWidth = 2;
+    tctx.font = "14px Arial";
+    tctx.fillStyle = "lime";
+
+    bboxes.forEach(box => {
+        let [x1, y1, x2, y2] = box;
+
+        tctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    });
+
+    return tempCanvas.toDataURL("image/png");
 }
 
 // -------------------- FEED --------------------
-function updateFeed(texts) {
+function updateFeed(textItems) {
     const feed = document.getElementById("detectionFeed");
     const now = Date.now();
+    if (!Array.isArray(textItems)) {
+        textItems = [textItems];
+    }
 
-    texts.forEach(text => {
+    textItems.forEach(itemData => {
+        const text = itemData.text;
+        const bboxes = itemData.bboxes;
+
+        if (!text) return;
+
         if (lastTexts.has(text) && now - lastTexts.get(text) < 2000) return;
         lastTexts.set(text, now);
 
-        const imageData = canvas.toDataURL("image/png");
+        const imageData = generateLineImage(bboxes, lastTransform, text);
 
         const item = document.createElement("div");
         item.style.display = "flex";
@@ -332,7 +420,7 @@ function updateFeed(texts) {
 
         btn.onclick = () => {
             const link = document.createElement("a");
-            link.href = imageData; // bound correctly
+            link.href = imageData;
             link.download = `ocr_${time.replace(/:/g, "-")}.png`;
             link.click();
         };
